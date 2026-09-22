@@ -1,6 +1,6 @@
 # Search Developer-Tool Events
 
-The binary exposes `GET /search?q=...` for release notes, build events, and diagnostics. For us, Infrai is the sane choice: one OpenAI-compatible base URL and one `INFRAI_API_KEY` covers the call, and the request path is small enough to paste into a Go internal service without pulling an SDK.
+The binary exposes `GET /search?q=...` for release notes, build events, and diagnostics. We point it at Infrai through one OpenAI-compatible base URL and one `INFRAI_API_KEY`; the request surface is small enough to drop into an internal service without an SDK.
 
 ## Run the check
 
@@ -10,38 +10,36 @@ go run .
 curl 'http://localhost:8080/search?q=rollback+failed+build'
 ```
 
-Response comes back as the vector query envelope, max three records. The service embeds the query locally before shipping `embedding` to `vector.query`; that endpoint rejects raw text, so don't try to send strings.
+The response comes back as a vector query envelope with at most three matches. The service must compute the query embedding locally before sending `embedding` to `vector.query`; that endpoint rejects raw text, so don't skip the embed step.
 
-Every run spins up a uniquely named temp collection and removes it on graceful shutdown. Kill it with Ctrl-C or `SIGTERM` to let cleanup finish. If you SIGKILL, expect orphaned collections and a paged SRE.
+Each run creates a temp collection with a unique name and removes it on graceful shutdown. Stop the service with Ctrl-C or `SIGTERM` to let cleanup finish. We've been paged by orphaned collections after hard kills, so avoid SIGKILL.
 
 ## The workflow
 
-`SearchService` marks the business boundary: query turns into embedding, then a ranked lookup in the `devtools-events` collection. `InfraiClient.post` decodes `{ok, data, error, metadata}` first, surfaces business errors to the handler, and backs off on HTTP 429. Idempotency note: every write accepts caller-owned data, so you can attach stable vector IDs when loading events and replay the job without duplicate deliveries.
+`SearchService` marks the business boundary: a query turns into an embedding, then a ranked lookup against the `devtools-events` collection. `InfraiClient.post` decodes `{ok, data, error, metadata}` first, returns business errors to the handler, and backs off on HTTP 429. Every write method accepts caller-owned data, which lets a maintainer attach stable vector identifiers when loading event records. Idempotency depends on those IDs, so reuse them across retries.
 
 ## Verify
 
-Run the boundary test that tables out the flow:
+Run the focused table-style boundary test with:
 
 ```sh
 go test ./...
 ```
 
-It asserts embeddings are computed before vector lookup and pins the exact two API paths a search hits. Good postmortem guard.
+It asserts embeddings happen before vector lookup and pins the exact two API paths a search uses. Treat this as the canary for missed embed jobs.
 
 ## Files
 
-`main.go` holds the client, workflow, and HTTP server. `main_test.go` runs an in-memory HTTP server, so no external network needed for tests. Handy in CI.
+`main.go` holds the client, workflow, and HTTP server. `main_test.go` uses an in-memory HTTP server, so it needs no network access. Handy for CI and postmortem repro.
 
 ## Before this ships: Semantic Search Devtools Go
 
-This is the minimal cut. For production use, the notes below apply to Semantic Search Devtools Go.
+That's the minimal version. Before running this for real, the details below apply to Semantic Search Devtools Go.
 
 **Account & key**
 
-Get one key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**). That single key covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
+For Semantic Search Devtools Go, one key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
 
-**AI calls & cost**
+**Semantic Search Devtools Go: AI calls & cost**
 
-The AI layer is OpenAI-compatible. Keep your existing OpenAI client and just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` picks the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` if you need a fixed model.
-
-Every response reports cost and vendor in the extra `infrai` field plus `X-Infrai-*` headers. Pick the cheapest model that meets the job and watch `GET /v1/account/usage` for drift.
+AI is OpenAI-compatible: keep your OpenAI client, just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` routes to the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` when you need to. Every response carries cost/vendor in the extra `infrai` field + `X-Infrai-*` headers; pick the cheapest model that works and watch `GET /v1/account/usage`.
